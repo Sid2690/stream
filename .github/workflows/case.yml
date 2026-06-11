@@ -1,0 +1,47 @@
+name: CazéTV 
+
+on: workflow_dispatch
+
+jobs:
+  stream:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg python3 curl
+
+      - name: Install yt-dlp
+        run: |
+          sudo curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp
+          sudo chmod a+rx /usr/local/bin/yt-dlp
+
+      - name: Install ngrok
+        run: |
+          curl -sSL https://ngrok-agent.s3.amazonaws.com/ngrok.asc | sudo tee /etc/apt/trusted.gpg.d/ngrok.asc
+          echo "deb https://ngrok-agent.s3.amazonaws.com buster main" | sudo tee /etc/apt/sources.list.d/ngrok.list
+          sudo apt-get update
+          sudo apt-get install -y ngrok
+          ngrok config add-authtoken ${{ secrets.NGROK_AUTHTOKEN }}
+
+      - name: Connect Brazil VPN (Windscribe)
+        run: |
+          wget -q https://windscribe.com/install/linux -O windscribe.deb || true
+          sudo dpkg -i windscribe.deb || true
+          sudo apt-get install -f -y || true
+          windscribe connect Brazil || true
+
+      - name: Start CazéTV live stream + temporary link
+        run: |
+          mkdir -p ~/hls
+          # Better command for live streaming (targets the live tab)
+          yt-dlp "https://www.youtube.com/cazetv/live" \
+            --live-from-start \
+            -o - | \
+          ffmpeg -i pipe:0 -c copy \
+            -f hls -hls_time 4 -hls_list_size 6 -hls_flags delete_segments \
+            ~/hls/stream.m3u8 &
+
+          cd ~/hls && python3 -m http.server 8000 &
+          sleep 20
+          ngrok http 8000 --log=stdout
