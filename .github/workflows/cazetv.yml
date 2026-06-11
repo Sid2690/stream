@@ -1,4 +1,4 @@
-name: CazéTV → Temporary Public HLS Link (no login)
+name: CazéTV → Temporary Public HLS Link
 
 on: workflow_dispatch
 
@@ -6,35 +6,37 @@ jobs:
   stream:
     runs-on: ubuntu-latest
     steps:
-      - name: Install Windscribe
-        run: |
-          wget https://windscribe.com/install/linux -O windscribe.deb
-          sudo dpkg -i windscribe.deb || true
-          sudo apt-get install -f -y
-
-      - name: Connect to Brazil (no login)
-        run: windscribe connect Brazil
-
-      - name: Install yt-dlp + ffmpeg + ngrok
+      - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg python3
+          sudo apt-get install -y ffmpeg python3 curl
+
+      - name: Install Windscribe CLI
+        run: |
+          wget -q https://windscribe.com/install/linux -O windscribe.deb || true
+          sudo dpkg -i windscribe.deb || true
+          sudo apt-get install -f -y || true
+
+      - name: Connect to Brazil
+        run: windscribe connect Brazil || true
+
+      - name: Install yt-dlp and ngrok
+        run: |
           sudo curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp
           sudo chmod a+rx /usr/local/bin/yt-dlp
 
-          # ngrok
           curl -sSL https://ngrok-agent.s3.amazonaws.com/ngrok.asc | sudo tee /etc/apt/trusted.gpg.d/ngrok.asc
           echo "deb https://ngrok-agent.s3.amazonaws.com buster main" | sudo tee /etc/apt/sources.list.d/ngrok.list
-          sudo apt update && sudo apt install -y ngrok
+          sudo apt-get update
+          sudo apt-get install -y ngrok
 
-      - name: Start stream + expose temporary link
+      - name: Start CazéTV stream + temporary link
         run: |
           mkdir -p ~/hls
           yt-dlp "https://www.youtube.com/cazetv" \
-            --live-from-start \
-            -o - | \
+            --live-from-start -o - | \
           ffmpeg -i pipe:0 -c copy \
-            -f hls -hls_time 4 -hls_list_size 6 \
+            -f hls -hls_time 4 -hls_list_size 6 -hls_flags delete_segments \
             ~/hls/stream.m3u8 &
 
           cd ~/hls && python3 -m http.server 8000 &
