@@ -1,4 +1,4 @@
-name: CazéTV → Temporary Public HLS Link
+name: CazéTV → Temporary Public HLS Link (no login)
 
 on: workflow_dispatch
 
@@ -6,41 +6,37 @@ jobs:
   stream:
     runs-on: ubuntu-latest
     steps:
-      - name: Install Windscribe + tools
+      - name: Install Windscribe
         run: |
           wget https://windscribe.com/install/linux -O windscribe.deb
-          sudo dpkg -i windscribe.deb || sudo apt-get install -f -y
+          sudo dpkg -i windscribe.deb || true
+          sudo apt-get install -f -y
+
+      - name: Connect to Brazil (no login)
+        run: windscribe connect Brazil
+
+      - name: Install yt-dlp + ffmpeg + ngrok
+        run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg python3
           sudo curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp
           sudo chmod a+rx /usr/local/bin/yt-dlp
 
-      - name: Login & Connect Brazil VPN
-        run: |
-          windscribe login -u ${{ secrets.WINDSCRIBE_USER }} -p ${{ secrets.WINDSCRIBE_PASS }}
-          windscribe connect Brazil
-
-      - name: Install ngrok
-        run: |
+          # ngrok
           curl -sSL https://ngrok-agent.s3.amazonaws.com/ngrok.asc | sudo tee /etc/apt/trusted.gpg.d/ngrok.asc
           echo "deb https://ngrok-agent.s3.amazonaws.com buster main" | sudo tee /etc/apt/sources.list.d/ngrok.list
-          sudo apt update && sudo apt install ngrok
+          sudo apt update && sudo apt install -y ngrok
 
-      - name: Start CazéTV HLS stream + HTTP server + ngrok
+      - name: Start stream + expose temporary link
         run: |
           mkdir -p ~/hls
-          # Pull CazéTV and output HLS (adjust URL if you have a specific live video)
           yt-dlp "https://www.youtube.com/cazetv" \
             --live-from-start \
             -o - | \
-          ffmpeg -i pipe:0 \
-            -c:v copy -c:a copy \
-            -f hls -hls_time 4 -hls_list_size 6 -hls_flags delete_segments \
+          ffmpeg -i pipe:0 -c copy \
+            -f hls -hls_time 4 -hls_list_size 6 \
             ~/hls/stream.m3u8 &
 
-          # Simple HTTP server on port 8000
           cd ~/hls && python3 -m http.server 8000 &
-          sleep 10
-
-          # Expose it publicly (free tier gives a random temporary URL)
+          sleep 15
           ngrok http 8000 --log=stdout
