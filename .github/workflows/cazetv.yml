@@ -8,7 +8,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y ffmpeg python3 curl openssh-client
+          sudo apt-get install -y ffmpeg python3 curl openssh-client tor
 
       - name: Install yt-dlp
         run: |
@@ -16,56 +16,41 @@ jobs:
             -o /usr/local/bin/yt-dlp
           sudo chmod a+rx /usr/local/bin/yt-dlp
 
-      - name: Install Deno (for yt-dlp JS runtime)
+      - name: Install Deno
         run: |
           curl -fsSL https://deno.land/install.sh | sh
           echo "$HOME/.deno/bin" >> $GITHUB_PATH
 
-      - name: Find a free Brazil proxy
-        id: proxy
+      - name: Configure Tor with Brazil exit node
         run: |
-          # Fetch free proxy list filtered to Brazil (BR)
-          pip install requests --quiet
-          python3 << 'EOF'
-          import urllib.request, json, os
-
-          # Try free-proxy-list API
-          url = "https://proxylist.geonode.com/api/proxy-list?limit=20&page=1&sort_by=lastChecked&sort_type=desc&country=BR&protocols=http"
-          try:
-              req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-              data = json.loads(urllib.request.urlopen(req, timeout=10).read())
-              proxies = data.get("data", [])
-              for p in proxies:
-                  proxy_str = f"http://{p['ip']}:{p['port']}"
-                  print(f"PROXY={proxy_str}")
-                  # Write first working one to env
-                  with open(os.environ["GITHUB_ENV"], "a") as f:
-                      f.write(f"BR_PROXY={proxy_str}\n")
-                  break
-          except Exception as e:
-              print(f"Proxy fetch failed: {e}")
-              # Fallback: use a known public SOCKS proxy or skip
-              with open(os.environ["GITHUB_ENV"], "a") as f:
-                  f.write("BR_PROXY=\n")
+          sudo tee /etc/tor/torrc > /dev/null << 'EOF'
+          SocksPort 9050
+          ExitNodes {BR}
+          StrictNodes 1
           EOF
+          sudo systemctl restart tor
+          # Wait for Tor to bootstrap
+          echo "Waiting for Tor to connect..."
+          for i in $(seq 1 30); do
+            STATUS=$(sudo journalctl -u tor --no-pager -n 20 | grep -o 'Bootstrapped [0-9]*%' | tail -1)
+            echo "Tor: $STATUS"
+            echo "$STATUS" | grep -q "100%" && echo "Tor ready!" && break
+            sleep 3
+          done
 
-      - name: Start HLS stream with Brazil proxy
+      - name: Verify Brazil IP via Tor
+        run: |
+          COUNTRY=$(curl --socks5-hostname 127.0.0.1:9050 -s https://ipinfo.io/country)
+          echo "Exit country: $COUNTRY"
+
+      - name: Start HLS stream via Tor
         run: |
           mkdir -p ~/hls
-
-          # Build proxy flag if we have one
-          PROXY_FLAG=""
-          if [ -n "$BR_PROXY" ]; then
-            PROXY_FLAG="--proxy $BR_PROXY"
-            echo "Using proxy: $BR_PROXY"
-          else
-            echo "No proxy found, trying direct..."
-          fi
 
           yt-dlp \
             --no-playlist \
             --live-from-start \
-            $PROXY_FLAG \
+            --proxy "socks5://127.0.0.1:9050" \
             -f "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best" \
             -o - \
             "https://www.youtube.com/watch?v=YCNysrewn7k" | \
@@ -83,12 +68,17 @@ jobs:
           # Wait for playlist to appear
           echo "Waiting for HLS segments..."
           for i in $(seq 1 60); do
-            [ -f ~/hls/stream.m3u8 ] && echo "Playlist ready!" && break
-            sleep 2
+            if [ -f ~/hls/stream.m3u8 ]; then
+              echo "Playlist ready!"
+              cat ~/hls/stream.m3u8
+              break
+            fi
+            echo "Still waiting... ($i/60)"
+            sleep 3
           done
-          ls -la ~/hls/ || true
+          ls -la ~/hls/
 
-      - name: Expose via Serveo and print correct URL
+      - name: Expose via Serveo
         run: |
           mkdir -p ~/.ssh
           cat >> ~/.ssh/config << 'EOF'
@@ -98,7 +88,6 @@ jobs:
               ServerAliveCountMax 10
           EOF
 
-          # Start tunnel, log output
           ssh -R 80:localhost:8080 serveo.net \
             -o StrictHostKeyChecking=no \
             -o ServerAliveInterval=30 \
@@ -106,10 +95,7 @@ jobs:
 
           sleep 10
 
-          # Correctly parse the forwarding URL (not console.serveo.net)
           PUBLIC_URL=$(grep -o 'https://[a-zA-Z0-9_-]*\.serveousercontent\.com' /tmp/serveo.log | head -1)
-
-          # Fallback to old format if needed
           if [ -z "$PUBLIC_URL" ]; then
             PUBLIC_URL=$(grep -o 'https://[a-zA-Z0-9_-]*\.serveo\.net' /tmp/serveo.log | head -1)
           fi
@@ -120,5 +106,4 @@ jobs:
           echo "  $PUBLIC_URL/stream.m3u8"
           echo "========================================="
 
-          # Keep alive for 5.5 hours
           sleep 19800
