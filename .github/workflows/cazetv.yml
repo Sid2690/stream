@@ -1,5 +1,4 @@
 name: CazéTV → Temporary Public HLS Link
-
 on: workflow_dispatch
 
 jobs:
@@ -8,37 +7,66 @@ jobs:
     steps:
       - name: Install dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg python3 curl
+          sudo apt-get update -qq
+          sudo apt-get install -y ffmpeg python3 curl openssh-client
 
-      - name: Install Windscribe CLI
+      - name: Install yt-dlp
         run: |
-          wget -q https://windscribe.com/install/linux -O windscribe.deb || true
-          sudo dpkg -i windscribe.deb || true
-          sudo apt-get install -f -y || true
-
-      - name: Connect to Brazil
-        run: windscribe connect Brazil || true
-
-      - name: Install yt-dlp and ngrok
-        run: |
-          sudo curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp
+          sudo curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp \
+            -o /usr/local/bin/yt-dlp
           sudo chmod a+rx /usr/local/bin/yt-dlp
 
-          curl -sSL https://ngrok-agent.s3.amazonaws.com/ngrok.asc | sudo tee /etc/apt/trusted.gpg.d/ngrok.asc
-          echo "deb https://ngrok-agent.s3.amazonaws.com buster main" | sudo tee /etc/apt/sources.list.d/ngrok.list
-          sudo apt-get update
-          sudo apt-get install -y ngrok
-
-      - name: Start CazéTV stream + temporary link
+      - name: Start HLS stream
         run: |
           mkdir -p ~/hls
-          yt-dlp "https://www.youtube.com/cazetv" \
-            --live-from-start -o - | \
-          ffmpeg -i pipe:0 -c copy \
-            -f hls -hls_time 4 -hls_list_size 6 -hls_flags delete_segments \
+
+          yt-dlp \
+            --no-playlist \
+            --live-from-start \
+            -f "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best" \
+            -o - \
+            "https://www.youtube.com/watch?v=YCNysrewn7k" | \
+          ffmpeg -re -i pipe:0 \
+            -c:v copy -c:a aac \
+            -f hls \
+            -hls_time 4 \
+            -hls_list_size 6 \
+            -hls_flags delete_segments+append_list \
             ~/hls/stream.m3u8 &
 
-          cd ~/hls && python3 -m http.server 8000 &
-          sleep 15
-          ngrok http 8000 --log=stdout
+          # Serve HLS directory
+          cd ~/hls && python3 -m http.server 8080 &
+
+          # Wait for playlist to appear
+          echo "Waiting for HLS segments..."
+          for i in $(seq 1 30); do
+            [ -f ~/hls/stream.m3u8 ] && echo "Playlist ready!" && break
+            sleep 2
+          done
+
+      - name: Expose via Serveo (no auth needed)
+        run: |
+          # Disable host key checking so it connects without prompts
+          mkdir -p ~/.ssh
+          echo "Host serveo.net" >> ~/.ssh/config
+          echo "    StrictHostKeyChecking no" >> ~/.ssh/config
+          echo "    ServerAliveInterval 60" >> ~/.ssh/config
+
+          # Open SSH tunnel, capture assigned URL
+          ssh -R 80:localhost:8080 serveo.net \
+            -o StrictHostKeyChecking=no \
+            -o ServerAliveInterval=60 \
+            2>&1 | tee /tmp/serveo.log &
+
+          sleep 8
+
+          # Parse and print the public URL
+          PUBLIC_URL=$(grep -o 'https://[a-z0-9]*.serveo.net' /tmp/serveo.log | head -1)
+          echo ""
+          echo "========================================="
+          echo "  HLS Stream URL:"
+          echo "  $PUBLIC_URL/stream.m3u8"
+          echo "========================================="
+
+          # Keep alive
+          sleep 21000
